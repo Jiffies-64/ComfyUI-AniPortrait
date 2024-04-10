@@ -38,6 +38,7 @@ from .src.utils.draw_util import FaceMeshVisualizer
 from .src.utils.pose_util import project_points
 from scipy.spatial.transform import Rotation as R
 from scipy.interpolate import interp1d
+from .src.utils.pose_util import project_points, project_points_with_trans
 
 ani_path = f'{node_path}/ComfyUI-AniPortrait'
 # config_path = f'{ani_path}/configs/prompts/animation_audio.yaml'
@@ -56,23 +57,24 @@ class AniPortraitLoader:
         return {
             "required": {
                 "sd_path": (
-                "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/stable-diffusion-v1-5"}),
+                    "STRING",
+                    {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/stable-diffusion-v1-5"}),
                 "vae_path": (
-                "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/sd-vae-ft-mse"}),
+                    "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/sd-vae-ft-mse"}),
                 "image_encoder_path": (
-                "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/image_encoder"}),
+                    "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/image_encoder"}),
                 "wav2vec2_path": (
-                "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/wav2vec2-base-960h"}),
+                    "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/wav2vec2-base-960h"}),
                 "a2m_ckpt": (
-                "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/audio2mesh.pt"}),
+                    "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/audio2mesh.pt"}),
                 "motion_module_path": (
-                "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/motion_module.pth"}),
+                    "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/motion_module.pth"}),
                 "denoising_unet_path": (
-                "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/denoising_unet.pth"}),
+                    "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/denoising_unet.pth"}),
                 "reference_unet_path": (
-                "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/reference_unet.pth"}),
+                    "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/reference_unet.pth"}),
                 "pose_guider_path": (
-                "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/pose_guider.pth"}),
+                    "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/pose_guider.pth"}),
                 "weight_dtype": (["fp16", "fp32"], {"default": "fp16"}),
             },
         }
@@ -206,7 +208,7 @@ class AniPortraitRun:
             "required": {
                 "pipe": ("Pose2VideoPipeline",),
                 "wav2vec2_path": (
-                "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/wav2vec2-base-960h"}),
+                    "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/wav2vec2-base-960h"}),
                 "a2m_model": ("Audio2MeshModel",),
                 "image": ("IMAGE",),
                 "pose": ("IMAGE",),
@@ -307,21 +309,29 @@ class AniPortraitRun:
             pose_arr[i, :3] = euler_angles
             pose_arr[i, 3:6] = translation_vector
 
+        # total_frames = pose.shape[0]
+        # # fps = 30
+        # # # interpolate to 30 fps
+        # # new_fps = 30
+        # old_time = np.linspace(0, total_frames / fps, total_frames)
+        # new_time = np.linspace(0, total_frames / fps, int(total_frames * fps / fps))
+
+        # pose_arr_interp = np.zeros((len(new_time), 6))
+        # for i in range(6):
+        #     interp_func = interp1d(old_time, pose_arr[:, i])
+        #     pose_arr_interp[:, i] = interp_func(new_time)
+
+        # pose_seq = smooth_pose_seq(pose_arr_interp)
+        # # pose_seq = np.load(config['pose_temp'])
+        # mirrored_pose_seq = np.concatenate((pose_seq, pose_seq[-2:0:-1]), axis=0)
+        # cycled_pose_seq = np.tile(mirrored_pose_seq, (sample['seq_len'] // len(mirrored_pose_seq) + 1, 1))[
+        #                   :sample['seq_len']]
         total_frames = pose.shape[0]
-        # fps = 30
-        # # interpolate to 30 fps
-        # new_fps = 30
-        old_time = np.linspace(0, total_frames / fps, total_frames)
-        new_time = np.linspace(0, total_frames / fps, int(total_frames * fps / fps))
-
-        pose_arr_interp = np.zeros((len(new_time), 6))
+        pose_arr_interp = np.zeros((total_frames, 6))
         for i in range(6):
-            interp_func = interp1d(old_time, pose_arr[:, i])
-            pose_arr_interp[:, i] = interp_func(new_time)
-
-        pose_seq = smooth_pose_seq(pose_arr_interp)
-        # pose_seq = np.load(config['pose_temp'])
-        mirrored_pose_seq = np.concatenate((pose_seq, pose_seq[-2:0:-1]), axis=0)
+            interp_func = interp1d(np.arange(total_frames), pose_arr[:, i])
+            pose_arr_interp[:, i] = interp_func(np.arange(total_frames))
+        mirrored_pose_seq = np.concatenate((pose_arr_interp, pose_arr_interp[-2:0:-1]), axis=0)
         cycled_pose_seq = np.tile(mirrored_pose_seq, (sample['seq_len'] // len(mirrored_pose_seq) + 1, 1))[
                           :sample['seq_len']]
 
@@ -378,6 +388,239 @@ class AniPortraitRun:
         print(f'{video.shape}')
 
         return video
+
+
+class AniPortraitVideo2VideoLoader:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "sd_path": (
+                    "STRING",
+                    {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/stable-diffusion-v1-5"}),
+                "vae_path": (
+                    "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/sd-vae-ft-mse"}),
+                "image_encoder_path": (
+                    "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/image_encoder"}),
+                "motion_module_path": (
+                    "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/motion_module.pth"}),
+                "denoising_unet_path": (
+                    "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/denoising_unet.pth"}),
+                "reference_unet_path": (
+                    "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/reference_unet.pth"}),
+                "pose_guider_path": (
+                    "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/pose_guider.pth"}),
+                "weight_dtype": (["fp16", "fp32"], {"default": "fp16"}),
+            },
+        }
+
+    RETURN_TYPES = ("Pose2VideoPipeline",)
+    RETURN_NAMES = ("pipe",)
+    FUNCTION = "run"
+    CATEGORY = "AniPortrait"
+
+    def run(self, sd_path, vae_path, image_encoder_path, motion_module_path,
+            denoising_unet_path, reference_unet_path, pose_guider_path, weight_dtype):
+        config = OmegaConf.load(facereenac_config_path)
+
+        OmegaConf.update(config, "pretrained_base_model_path", sd_path)
+        OmegaConf.update(config, "pretrained_vae_path", vae_path)
+        OmegaConf.update(config, "image_encoder_path", image_encoder_path)
+        OmegaConf.update(config, "denoising_unet_path", denoising_unet_path)
+        OmegaConf.update(config, "reference_unet_path", reference_unet_path)
+        OmegaConf.update(config, "pose_guider_path", pose_guider_path)
+        OmegaConf.update(config, "motion_module_path", motion_module_path)
+        OmegaConf.update(config, "inference_config", inference_config_path)
+        OmegaConf.update(config, "weight_dtype", weight_dtype)
+
+        if config.weight_dtype == "fp16":
+            weight_dtype = torch.float16
+        else:
+            weight_dtype = torch.float32
+
+        vae = AutoencoderKL.from_pretrained(
+            config.pretrained_vae_path,
+        ).to("cuda", dtype=weight_dtype)
+
+        reference_unet = UNet2DConditionModel.from_pretrained(
+            config.pretrained_base_model_path,
+            subfolder="unet",
+        ).to(dtype=weight_dtype, device="cuda")
+
+        infer_config = OmegaConf.load(config.inference_config)
+        denoising_unet = UNet3DConditionModel.from_pretrained_2d(
+            config.pretrained_base_model_path,
+            config.motion_module_path,
+            subfolder="unet",
+            unet_additional_kwargs=infer_config.unet_additional_kwargs,
+        ).to(dtype=weight_dtype, device="cuda")
+
+        pose_guider = PoseGuider(noise_latent_channels=320, use_ca=True).to(device="cuda",
+                                                                            dtype=weight_dtype)  # not use cross attention
+
+        image_enc = CLIPVisionModelWithProjection.from_pretrained(
+            config.image_encoder_path
+        ).to(dtype=weight_dtype, device="cuda")
+
+        sched_kwargs = OmegaConf.to_container(infer_config.noise_scheduler_kwargs)
+        scheduler = DDIMScheduler(**sched_kwargs)
+
+        # load pretrained weights
+        denoising_unet.load_state_dict(
+            torch.load(config.denoising_unet_path, map_location="cpu"),
+            strict=False,
+        )
+        reference_unet.load_state_dict(
+            torch.load(config.reference_unet_path, map_location="cpu"),
+        )
+        pose_guider.load_state_dict(
+            torch.load(config.pose_guider_path, map_location="cpu"),
+        )
+
+        pipe = Pose2VideoPipeline(
+            vae=vae,
+            image_encoder=image_enc,
+            reference_unet=reference_unet,
+            denoising_unet=denoising_unet,
+            pose_guider=pose_guider,
+            scheduler=scheduler,
+        )
+        pipe = pipe.to("cuda", dtype=weight_dtype)
+
+        return (pipe,)
+
+
+class AniPortraitVideo2VideoRun:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "pipe": ("Pose2VideoPipeline",),
+                "image": ("IMAGE",),
+                "pose": ("IMAGE",),
+                "width": ("INT", {"default": 512}),
+                "height": ("INT", {"default": 512}),
+                "fps": ("INT", {"default": 24}),
+                "steps": ("INT", {"default": 25}),
+                "cfg": ("FLOAT", {"default": 3.5}),
+                "seed": ("INT", {"default": 1234}),
+                "min_face_detection_confidence": ("FLOAT", {"default": 0.5}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "run"
+    CATEGORY = "AniPortrait"
+
+    def run(self, pipe, image, pose, width, height, fps, steps, cfg,
+            seed, min_face_detection_confidence):
+        generator = torch.manual_seed(seed)
+        lmk_extractor = LMKExtractor(min_face_detection_confidence=min_face_detection_confidence)
+        vis = FaceMeshVisualizer(forehead_edge=False)
+
+        # ref_name = Path(ref_image_path).stem
+        # pose_name = Path(source_video_path).stem
+
+        # 参考图像预处理
+        # ref_image_pil = Image.open(ref_image_path).convert("RGB")
+        ref_image = 255.0 * image[0].cpu().numpy()
+        ref_image_pil = Image.fromarray(np.clip(ref_image, 0, 255).astype(np.uint8))
+        ref_image_np = cv2.cvtColor(np.array(ref_image_pil), cv2.COLOR_RGB2BGR)
+        ref_image_np = cv2.resize(ref_image_np, (height, width))
+
+        # 提取关键点
+        face_result = lmk_extractor(ref_image_np)
+        assert face_result is not None, "Can not detect a face in the reference image."
+        lmks = face_result['lmks'].astype(np.float32)
+        ref_pose = vis.draw_landmarks((ref_image_np.shape[1], ref_image_np.shape[0]), lmks, normed=True)
+
+        # 读取源视频帧和相关参数
+        # source_images = read_frames(source_video_path)
+        # src_fps = get_fps(source_video_path)
+        print(f"source video has {len(pose)} frames, with {fps} fps")
+        pose_transform = transforms.Compose(
+            [transforms.Resize((height, width)), transforms.ToTensor()]
+        )
+
+        # step = 1
+        # if fps == 60:
+        #     src_fps = 30
+        #     step = 2
+
+        pose_trans_list = []
+        verts_list = []
+        bs_list = []
+        for src_image_pil in pose:
+            src_image_pil = 255.0 * src_image_pil.cpu().numpy()
+            src_image_pil = Image.fromarray(np.clip(src_image_pil, 0, 255).astype(np.uint8))
+            src_img_np = cv2.cvtColor(np.array(src_image_pil), cv2.COLOR_RGB2BGR)
+            src_img_np = cv2.resize(src_img_np, (height, width))
+            frame_height, frame_width, _ = src_img_np.shape
+            src_img_result = lmk_extractor(src_img_np)
+            if src_img_result is None:
+                break
+            pose_trans_list.append(src_img_result['trans_mat'])
+            verts_list.append(src_img_result['lmks3d'])
+            bs_list.append(src_img_result['bs'])
+
+        # 处理姿势数据
+        pose_arr = np.array(pose_trans_list)
+        verts_arr = np.array(verts_list)
+        bs_arr = np.array(bs_list)
+        min_bs_idx = np.argmin(bs_arr.sum(1))
+
+        # face retarget
+        verts_arr = verts_arr - verts_arr[min_bs_idx] + face_result['lmks3d']
+        # project 3D mesh to 2D landmark
+        projected_vertices = project_points_with_trans(verts_arr, pose_arr, [height, width])
+
+        pose_list = []
+        for i, verts in enumerate(projected_vertices):
+            lmk_img = vis.draw_landmarks((width, height), verts, normed=False)
+            pose_image_np = cv2.resize(lmk_img, (width, height))
+            pose_list.append(pose_image_np)
+
+        pose_list = np.array(pose_list)
+        video_length = len(pose_list)
+
+        video = pipe(
+            ref_image_pil,
+            pose_list,
+            ref_pose,
+            width,
+            height,
+            video_length,
+            steps,
+            cfg,
+            generator=generator,
+        ).videos
+
+        print(f'{video.shape}')
+        video = video.permute(0, 2, 3, 4, 1)
+        print(f'{video.shape}')
+
+        return video
+
+        # video = torch.cat([ref_image_tensor, video, src_tensor], dim=0)
+        # save_path = f"{save_dir}/{ref_name}_{pose_name}_{args.H}x{args.W}_{int(args.cfg)}_{time_str}_noaudio.mp4"
+        # save_videos_grid(
+        #     video,
+        #     save_path,
+        #     n_rows=3,
+        #     fps=src_fps if args.fps is None else args.fps,
+        # )
+        #
+        # audio_output = 'audio_from_video.aac'
+        # # extract audio
+        # ffmpeg.input(source_video_path).output(audio_output, acodec='copy').run()
+        # # merge audio and video
+        # stream = ffmpeg.input(save_path)
+        # audio = ffmpeg.input(audio_output)
+        # ffmpeg.output(stream.video, audio.audio, save_path.replace('_noaudio.mp4', '.mp4'), vcodec='copy',
+        #               acodec='aac').run()
+        #
+        # os.remove(save_path)
+        # os.remove(audio_output)
 
 
 class MaskList2Video:
@@ -464,7 +707,9 @@ class CoverVideo:
 
 NODE_CLASS_MAPPINGS = {
     "AniPortraitLoader": AniPortraitLoader,
+    "AniPortraitVideo2VideoLoader": AniPortraitVideo2VideoLoader,
     "AniPortraitRun": AniPortraitRun,
+    "AniPortraitVideo2VideoRun": AniPortraitVideo2VideoRun,
     "MaskList2Video": MaskList2Video,
     "Box2Video": Box2Video,
     "CoverVideo": CoverVideo,
