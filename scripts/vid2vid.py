@@ -44,16 +44,21 @@ def parse_args():
 
     return args
 
+
 def main():
+    # 解析命令行参数
     args = parse_args()
 
+    # 加载配置文件
     config = OmegaConf.load(args.config)
 
+    # 根据配置文件中的权重类型选择相应的数据类型
     if config.weight_dtype == "fp16":
         weight_dtype = torch.float16
     else:
         weight_dtype = torch.float32
 
+    # 加载预训练的自编码器模型和 UNet2D 模型
     vae = AutoencoderKL.from_pretrained(
         config.pretrained_vae_path,
     ).to("cuda", dtype=weight_dtype)
@@ -63,6 +68,7 @@ def main():
         subfolder="unet",
     ).to(dtype=weight_dtype, device="cuda")
 
+    # 加载推理配置和 UNet3D 模型
     inference_config_path = config.inference_config
     infer_config = OmegaConf.load(inference_config_path)
     denoising_unet = UNet3DConditionModel.from_pretrained_2d(
@@ -72,12 +78,11 @@ def main():
         unet_additional_kwargs=infer_config.unet_additional_kwargs,
     ).to(dtype=weight_dtype, device="cuda")
 
-    pose_guider = PoseGuider(noise_latent_channels=320, use_ca=True).to(device="cuda", dtype=weight_dtype) # not use cross attention
-
+    # 初始化姿势引导器、图像编码器和调度器
+    pose_guider = PoseGuider(noise_latent_channels=320, use_ca=True).to(device="cuda", dtype=weight_dtype)  # not use cross attention
     image_enc = CLIPVisionModelWithProjection.from_pretrained(
         config.image_encoder_path
     ).to(dtype=weight_dtype, device="cuda")
-
     sched_kwargs = OmegaConf.to_container(infer_config.noise_scheduler_kwargs)
     scheduler = DDIMScheduler(**sched_kwargs)
 
@@ -85,74 +90,52 @@ def main():
 
     width, height = args.W, args.H
 
-    # load pretrained weights
-    denoising_unet.load_state_dict(
-        torch.load(config.denoising_unet_path, map_location="cpu"),
-        strict=False,
-    )
-    reference_unet.load_state_dict(
-        torch.load(config.reference_unet_path, map_location="cpu"),
-    )
-    pose_guider.load_state_dict(
-        torch.load(config.pose_guider_path, map_location="cpu"),
-    )
-
-    pipe = Pose2VideoPipeline(
-        vae=vae,
-        image_encoder=image_enc,
-        reference_unet=reference_unet,
-        denoising_unet=denoising_unet,
-        pose_guider=pose_guider,
-        scheduler=scheduler,
-    )
-    pipe = pipe.to("cuda", dtype=weight_dtype)
-
+    # 创建输出目录
     date_str = datetime.now().strftime("%Y%m%d")
     time_str = datetime.now().strftime("%H%M")
     save_dir_name = f"{time_str}--seed_{args.seed}-{args.W}x{args.H}"
-
     save_dir = Path(f"output/{date_str}/{save_dir_name}")
     save_dir.mkdir(exist_ok=True, parents=True)
 
-
     lmk_extractor = LMKExtractor()
     vis = FaceMeshVisualizer(forehead_edge=False)
-    
 
+    # 遍历测试用例
     for ref_image_path in config["test_cases"].keys():
-        # Each ref_image may correspond to multiple actions
+        # 每个 ref_image 可对应多个动作
         for source_video_path in config["test_cases"][ref_image_path]:
             ref_name = Path(ref_image_path).stem
             pose_name = Path(source_video_path).stem
 
+            # 加载参考图像并进行预处理
             ref_image_pil = Image.open(ref_image_path).convert("RGB")
             ref_image_np = cv2.cvtColor(np.array(ref_image_pil), cv2.COLOR_RGB2BGR)
             ref_image_np = cv2.resize(ref_image_np, (args.H, args.W))
-            
+
+            # 提取关键点
             face_result = lmk_extractor(ref_image_np)
-            assert face_result is not None, "Can not detect a face in the reference image."
+            assert face_result is not None, "无法在参考图像中检测到人脸"
             lmks = face_result['lmks'].astype(np.float32)
             ref_pose = vis.draw_landmarks((ref_image_np.shape[1], ref_image_np.shape[0]), lmks, normed=True)
-            
-            
 
+            # 读取源视频帧和相关参数
             source_images = read_frames(source_video_path)
             src_fps = get_fps(source_video_path)
-            print(f"source video has {len(source_images)} frames, with {src_fps} fps")
+            print(f"源视频包含 {len(source_images)} 帧，帧率为 {src_fps} fps")
             pose_transform = transforms.Compose(
                 [transforms.Resize((height, width)), transforms.ToTensor()]
             )
-            
+
             step = 1
             if src_fps == 60:
                 src_fps = 30
                 step = 2
-            
+
             pose_trans_list = []
             verts_list = []
             bs_list = []
             src_tensor_list = []
-            for src_image_pil in source_images[: args.L*step: step]:
+            for src_image_pil in source_images[: args.L * step: step]:
                 src_tensor_list.append(pose_transform(src_image_pil))
                 src_img_np = cv2.cvtColor(np.array(src_image_pil), cv2.COLOR_RGB2BGR)
                 frame_height, frame_width, _ = src_img_np.shape
@@ -163,25 +146,25 @@ def main():
                 verts_list.append(src_img_result['lmks3d'])
                 bs_list.append(src_img_result['bs'])
 
-            
+            # 处理姿势数据
             pose_arr = np.array(pose_trans_list)
             verts_arr = np.array(verts_list)
             bs_arr = np.array(bs_list)
             min_bs_idx = np.argmin(bs_arr.sum(1))
 
-            # face retarget
+            # 人脸重定向
             verts_arr = verts_arr - verts_arr[min_bs_idx] + face_result['lmks3d']
-            # project 3D mesh to 2D landmark
+            # 3D 网格投影到 2D 关键点
             projected_vertices = project_points_with_trans(verts_arr, pose_arr, [frame_height, frame_width])
-            
+
             pose_list = []
             for i, verts in enumerate(projected_vertices):
                 lmk_img = vis.draw_landmarks((frame_width, frame_height), verts, normed=False)
-                pose_image_np = cv2.resize(lmk_img,  (width, height))
+                pose_image_np = cv2.resize(lmk_img, (width, height))
                 pose_list.append(pose_image_np)
-            
+
             pose_list = np.array(pose_list)
-            
+
             video_length = len(src_tensor_list)
 
             ref_image_tensor = pose_transform(ref_image_pil)  # (c, h, w)
@@ -196,6 +179,7 @@ def main():
             src_tensor = src_tensor.transpose(0, 1)
             src_tensor = src_tensor.unsqueeze(0)
 
+            # 生成视频并保存
             video = pipe(
                 ref_image_pil,
                 pose_list,
@@ -216,17 +200,18 @@ def main():
                 n_rows=3,
                 fps=src_fps if args.fps is None else args.fps,
             )
-            
+
+            # 提取音频并合并音频和视频
             audio_output = 'audio_from_video.aac'
-            # extract audio
             ffmpeg.input(source_video_path).output(audio_output, acodec='copy').run()
-            # merge audio and video
             stream = ffmpeg.input(save_path)
             audio = ffmpeg.input(audio_output)
             ffmpeg.output(stream.video, audio.audio, save_path.replace('_noaudio.mp4', '.mp4'), vcodec='copy', acodec='aac').run()
-            
+
+            # 清理临时文件
             os.remove(save_path)
             os.remove(audio_output)
+
 
 if __name__ == "__main__":
     main()

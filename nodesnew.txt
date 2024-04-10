@@ -35,12 +35,11 @@ from .src.audio_models.model import Audio2MeshModel
 from .src.utils.audio_util import prepare_audio_feature
 from .src.utils.mp_utils import LMKExtractor
 from .src.utils.draw_util import FaceMeshVisualizer
-from .src.utils.pose_util import project_points
+from .src.utils.pose_util import project_points, project_points_with_trans
 from scipy.spatial.transform import Rotation as R
 from scipy.interpolate import interp1d
 
 ani_path = f'{node_path}/ComfyUI-AniPortrait'
-# config_path = f'{ani_path}/configs/prompts/animation_audio.yaml'
 audio_config_path = f'{ani_path}/configs/prompts/animation_audio.yaml'
 facereenac_config_path = f'{ani_path}/configs/prompts/animation_facereenac.yaml'
 inference_config_path = f'{ani_path}/configs/inference/inference_v2.yaml'
@@ -199,18 +198,14 @@ def smooth_pose_seq(pose_seq, window_size=5):
     return smoothed_pose_seq
 
 
-class AniPortraitRun:
+class AniPortraitVideo2VideoRun:
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
                 "pipe": ("Pose2VideoPipeline",),
-                "wav2vec2_path": (
-                "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/wav2vec2-base-960h"}),
-                "a2m_model": ("Audio2MeshModel",),
                 "image": ("IMAGE",),
                 "pose": ("IMAGE",),
-                "audio_path": ("STRING", {"default": audio_config_path}),
                 "width": ("INT", {"default": 512}),
                 "height": ("INT", {"default": 512}),
                 "video_length": ("INT", {"default": 16}),
@@ -227,7 +222,243 @@ class AniPortraitRun:
     FUNCTION = "run"
     CATEGORY = "AniPortrait"
 
-    def run(self, pipe, wav2vec2_path, a2m_model, image, pose, audio_path, width, height, video_length, fps, steps, cfg,
+    def run(self, pipe, image, pose, width, height, video_length, fps, steps, cfg,
+            seed, weight_dtype, min_face_detection_confidence):
+        generator = torch.manual_seed(seed)
+        lmk_extractor = LMKExtractor(min_face_detection_confidence=min_face_detection_confidence)
+        vis = FaceMeshVisualizer(forehead_edge=False)
+
+        # here
+        ref_image = 255.0 * image[0].cpu().numpy()
+        ref_image_pil = Image.fromarray(np.clip(ref_image, 0, 255).astype(np.uint8))
+        ref_image_np = cv2.cvtColor(np.array(ref_image_pil), cv2.COLOR_RGB2BGR)
+        ref_image_np = cv2.resize(ref_image_np, (height, width))
+
+        face_result = lmk_extractor(ref_image_np)
+        assert face_result is not None, "Can not detect a face in the reference image."
+        lmks = face_result['lmks'].astype(np.float32)
+        ref_pose = vis.draw_landmarks((ref_image_np.shape[1], ref_image_np.shape[0]), lmks, normed=True)
+
+        trans_mat_list = []
+        for frame in pose:
+            frame = 255.0 * frame.cpu().numpy()
+            frame = Image.fromarray(np.clip(frame, 0, 255).astype(np.uint8))
+            frame = cv2.cvtColor(np.array(frame), cv2.COLOR_RGB2BGR)
+            frame = cv2.resize(frame, (height, width))
+            result = lmk_extractor(frame)
+            if result is not None and result['trans_mat'] is not None:
+                trans_mat_list.append(result['trans_mat'].astype(np.float32))
+            else:
+                # todo
+                trans_mat_list.append(trans_mat_list[-1])
+        trans_mat_arr = np.array(trans_mat_list)
+
+        # 计算姿势变换
+        trans_mat_inv_frame_0 = np.linalg.inv(trans_mat_arr[0])  # 计算逆变换矩阵
+        pose_arr = np.zeros([trans_mat_arr.shape[0], 6])  # 初始化姿势数组
+
+        for i in range(pose_arr.shape[0]):
+            pose_mat = trans_mat_inv_frame_0 @ trans_mat_arr[i]  # 计算姿势矩阵
+            euler_angles, translation_vector = matrix_to_euler_and_translation(pose_mat)  # 转换为欧拉角和平移向量
+            pose_arr[i, :3] = euler_angles  # 添加欧拉角到数组
+            pose_arr[i, 3:6] = translation_vector  # 添加平移向量到数组
+
+        total_frames = pose.shape[0]  # 获取总帧数
+        fps = 30  # 设置帧率
+        # 插值到30帧每秒
+        new_fps = 30  # 新的帧率
+        old_time = np.linspace(0, total_frames / fps, total_frames)  # 生成旧时间轴
+        new_time = np.linspace(0, total_frames / fps, int(total_frames * new_fps / fps))  # 生成新时间轴
+
+        pose_arr_interp = np.zeros((len(new_time), 6))  # 初始化插值后的姿势数组
+        for i in range(6):
+            interp_func = interp1d(old_time, pose_arr[:, i])  # 创建插值函数
+            pose_arr_interp[:, i] = interp_func(new_time)  # 进行插值
+
+        pose_seq = smooth_pose_seq(pose_arr_interp)  # 平滑姿势序列
+        mirrored_pose_seq = np.concatenate((pose_seq, pose_seq[-2:0:-1]), axis=0)  # 镜像姿势序列
+        cycled_pose_seq = np.tile(mirrored_pose_seq, (sample['seq_len'] // len(mirrored_pose_seq) + 1, 1))[
+                          :sample['seq_len']]  # 循环姿势序列
+
+        # 将3D网格投影到2D关键点
+        projected_vertices = project_points(pred, face_result['trans_mat'], cycled_pose_seq, [height, width])
+
+        pose_images = []
+        for i, verts in enumerate(projected_vertices):
+            lmk_img = vis.draw_landmarks((width, height), verts, normed=False)  # 绘制关键点到图像
+            pose_images.append(lmk_img)  # 添加到姿势图像列表
+
+        pose_list = []
+        pose_tensor_list = []
+        print(f"pose video has {len(pose_images)} frames, with {fps} fps")  # 打印信息
+        pose_transform = transforms.Compose(
+            [transforms.Resize((height, width)), transforms.ToTensor()]  # 图像变换
+        )
+        for pose_image_np in pose_images[: video_length]:
+            pose_image_pil = Image.fromarray(cv2.cvtColor(pose_image_np, cv2.COLOR_BGR2RGB))  # 转换为PIL图像对象
+            pose_tensor_list.append(pose_transform(pose_image_pil))  # 添加到姿势张量列表
+            pose_image_np = cv2.resize(pose_image_np, (width, height))  # 调整大小
+            pose_list.append(pose_image_np)  # 添加到姿势图像列表
+
+        pose_list = np.array(pose_list)  # 转换为numpy数组
+
+        video_length = len(pose_tensor_list)  # 获取视频长度
+
+        ref_image_tensor = pose_transform(ref_image_pil)  # (c, h, w)
+        ref_image_tensor = ref_image_tensor.unsqueeze(1).unsqueeze(
+            0
+        )  # (1, c, 1, h, w)
+        ref_image_tensor = repeat(
+            ref_image_tensor, "b c f h w -> b c (repeat f) h w", repeat=video_length
+        )  # 重复参考图像张量
+
+        pose_tensor = torch.stack(pose_tensor_list, dim=0)  # (f, c, h, w)
+        pose_tensor = pose_tensor.transpose(0, 1)
+        pose_tensor = pose_tensor.unsqueeze(0)
+
+        video = pipe(
+            ref_image_pil,
+            pose_list,
+            ref_pose,
+            width,
+            height,
+            video_length,
+            steps,
+            cfg,
+            generator=generator,
+        ).videos  # 生成视频
+
+        print(f'{video.shape}')  # 打印视频形状
+        video = video.permute(0, 2, 3, 4, 1)  # 调整视频维度
+        print(f'{video.shape}')  # 打印视频形状
+
+        return video  # 返回视频
+
+        # print(f"pose video has {len(pose_images)} frames, with {fps} fps")
+        # pose_transform = transforms.Compose(
+        #     [transforms.Resize((height, width)), transforms.ToTensor()]
+        # )
+        #
+        # step = 1
+        # if src_fps == 60:
+        #     src_fps = 30
+        #     step = 2
+        #
+        # pose_trans_list = []
+        # verts_list = []
+        # bs_list = []
+        # src_tensor_list = []
+        # for src_image_pil in pose[: video_length * step: step]:
+        #     src_tensor_list.append(pose_transform(src_image_pil))
+        #     src_img_np = cv2.cvtColor(np.array(src_image_pil), cv2.COLOR_RGB2BGR)
+        #     frame_height, frame_width, _ = src_img_np.shape
+        #     src_img_result = lmk_extractor(src_img_np)
+        #     if src_img_result is None:
+        #         break
+        #     pose_trans_list.append(src_img_result['trans_mat'])
+        #     verts_list.append(src_img_result['lmks3d'])
+        #     bs_list.append(src_img_result['bs'])
+        #
+        # pose_arr = np.array(pose_trans_list)
+        # verts_arr = np.array(verts_list)
+        # bs_arr = np.array(bs_list)
+        # min_bs_idx = np.argmin(bs_arr.sum(1))
+        #
+        # # face retarget
+        # verts_arr = verts_arr - verts_arr[min_bs_idx] + face_result['lmks3d']
+        # # project 3D mesh to 2D landmark
+        # projected_vertices = project_points_with_trans(verts_arr, pose_arr, [frame_height, frame_width])
+        #
+        # pose_list = []
+        # for i, verts in enumerate(projected_vertices):
+        #     lmk_img = vis.draw_landmarks((frame_width, frame_height), verts, normed=False)
+        #     pose_image_np = cv2.resize(lmk_img, (width, height))
+        #     pose_list.append(pose_image_np)
+        #
+        # pose_list = np.array(pose_list)
+        #
+        # video_length = len(src_tensor_list)
+        #
+        # ref_image_tensor = pose_transform(ref_image_pil)  # (c, h, w)
+        # ref_image_tensor = ref_image_tensor.unsqueeze(1).unsqueeze(
+        #     0
+        # )  # (1, c, 1, h, w)
+        # ref_image_tensor = repeat(
+        #     ref_image_tensor, "b c f h w -> b c (repeat f) h w", repeat=video_length
+        # )
+        #
+        # src_tensor = torch.stack(src_tensor_list, dim=0)  # (f, c, h, w)
+        # src_tensor = src_tensor.transpose(0, 1)
+        # src_tensor = src_tensor.unsqueeze(0)
+        #
+        # video = pipe(
+        #     ref_image_pil,
+        #     pose_list,
+        #     ref_pose,
+        #     width,
+        #     height,
+        #     video_length,
+        #     steps,
+        #     cfg,
+        #     generator=generator,
+        # ).videos
+        #
+        # print(f'{video.shape}')
+        # video = video.permute(0, 2, 3, 4, 1)
+        # print(f'{video.shape}')
+        #
+        # return video
+
+        # video = torch.cat([ref_image_tensor, video, src_tensor], dim=0)
+        # save_path = f"{save_dir}/{ref_name}_{pose_name}_{height}x{width}_{int(cfg)}_{time_str}_noaudio.mp4"
+        # save_videos_grid(
+        #     video,
+        #     save_path,
+        #     n_rows=3,
+        #     fps=src_fps if fps is None else fps,
+        # )
+        #
+        # audio_output = 'audio_from_video.aac'
+        # # extract audio
+        # ffmpeg.input(source_video_path).output(audio_output, acodec='copy').run()
+        # # merge audio and video
+        # stream = ffmpeg.input(save_path)
+        # audio = ffmpeg.input(audio_output)
+        # ffmpeg.output(stream.video, audio.audio, save_path.replace('_noaudio.mp4', '.mp4'), vcodec='copy',
+        #               acodec='aac').run()
+        #
+        # os.remove(save_path)
+        # os.remove(audio_output)
+
+
+class AniPortraitRun:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "pipe": ("Pose2VideoPipeline",),
+                "wav2vec2_path": (
+                "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/wav2vec2-base-960h"}),
+                "a2m_model": ("Audio2MeshModel",),
+                "image": ("IMAGE",),
+                "pose": ("IMAGE",),
+                "audio_path": ("STRING", {"default": audio_path}),
+                "width": ("INT", {"default": 512}),
+                "height": ("INT", {"default": 512}),
+                "video_length": ("INT", {"default": 16}),
+                "steps": ("INT", {"default": 25}),
+                "cfg": ("FLOAT", {"default": 3.5}),
+                "seed": ("INT", {"default": 1234}),
+                "weight_dtype": (["fp16", "fp32"], {"default": "fp16"}),
+                "min_face_detection_confidence": ("FLOAT", {"default": 0.5}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "run"
+    CATEGORY = "AniPortrait"
+
+    def run(self, pipe, wav2vec2_path, a2m_model, image, pose, audio_path, width, height, video_length, steps, cfg,
             seed, weight_dtype, min_face_detection_confidence):
         generator = torch.manual_seed(seed)
         config = OmegaConf.load(audio_config_path)
@@ -308,11 +539,11 @@ class AniPortraitRun:
             pose_arr[i, 3:6] = translation_vector
 
         total_frames = pose.shape[0]
-        # fps = 30
-        # # interpolate to 30 fps
-        # new_fps = 30
+        fps = 30
+        # interpolate to 30 fps
+        new_fps = 30
         old_time = np.linspace(0, total_frames / fps, total_frames)
-        new_time = np.linspace(0, total_frames / fps, int(total_frames * fps / fps))
+        new_time = np.linspace(0, total_frames / fps, int(total_frames * new_fps / fps))
 
         pose_arr_interp = np.zeros((len(new_time), 6))
         for i in range(6):
