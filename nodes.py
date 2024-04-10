@@ -346,7 +346,7 @@ class AniPortraitRun:
 
         pose_list = []
         pose_tensor_list = []
-        print(f"pose video has {len(pose_images)} frames, with {fps} fps")
+        print(f"pose by audio has {len(pred)} frames, but we only generate {video_length} frames, with {fps} fps")
         pose_transform = transforms.Compose(
             [transforms.Resize((height, width)), transforms.ToTensor()]
         )
