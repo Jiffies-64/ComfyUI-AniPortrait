@@ -1,5 +1,6 @@
 import argparse
 import os
+import time
 import folder_paths
 
 comfy_path = os.path.dirname(folder_paths.__file__)
@@ -32,7 +33,7 @@ from .src.pipelines.pipeline_pose2vid_long import Pose2VideoPipeline
 from .src.utils.util import get_fps, read_frames, save_videos_grid
 
 from .src.audio_models.model import Audio2MeshModel
-from .src.utils.audio_util import prepare_audio_feature
+from .src.utils.audio_util import prepare_audio_feature, prepare_audio_feature_from_audio_data
 from .src.utils.mp_utils import LMKExtractor
 from .src.utils.draw_util import FaceMeshVisualizer
 from .src.utils.pose_util import project_points
@@ -278,6 +279,199 @@ class AniPortraitRun:
 
         sample = prepare_audio_feature(audio_path, fps=fps,
                                        wav2vec_model_path=audio_infer_config['a2m_model']['model_path'])
+        sample['audio_feature'] = torch.from_numpy(sample['audio_feature']).float().cuda()
+        sample['audio_feature'] = sample['audio_feature'].unsqueeze(0)
+
+        # inference
+        pred = a2m_model.infer(sample['audio_feature'], sample['seq_len'])
+        pred = pred.squeeze().detach().cpu().numpy()
+        pred = pred.reshape(pred.shape[0], -1, 3)
+        pred = pred + face_result['lmks3d']
+
+        trans_mat_list = []
+        for frame in pose:
+            frame = 255.0 * frame.cpu().numpy()
+            frame = Image.fromarray(np.clip(frame, 0, 255).astype(np.uint8))
+            frame = cv2.cvtColor(np.array(frame), cv2.COLOR_RGB2BGR)
+            frame = cv2.resize(frame, (height, width))
+            result = lmk_extractor(frame)
+            if result is not None and result['trans_mat'] is not None:
+                trans_mat_list.append(result['trans_mat'].astype(np.float32))
+            else:
+                trans_mat_list.append(trans_mat_list[-1])
+        trans_mat_arr = np.array(trans_mat_list)
+
+        # compute delta pose
+        trans_mat_inv_frame_0 = np.linalg.inv(trans_mat_arr[0])
+        pose_arr = np.zeros([trans_mat_arr.shape[0], 6])
+
+        for i in range(pose_arr.shape[0]):
+            pose_mat = trans_mat_inv_frame_0 @ trans_mat_arr[i]
+            euler_angles, translation_vector = matrix_to_euler_and_translation(pose_mat)
+            pose_arr[i, :3] = euler_angles
+            pose_arr[i, 3:6] = translation_vector
+
+        # total_frames = pose.shape[0]
+        # # fps = 30
+        # # # interpolate to 30 fps
+        # # new_fps = 30
+        # old_time = np.linspace(0, total_frames / fps, total_frames)
+        # new_time = np.linspace(0, total_frames / fps, int(total_frames * fps / fps))
+
+        # pose_arr_interp = np.zeros((len(new_time), 6))
+        # for i in range(6):
+        #     interp_func = interp1d(old_time, pose_arr[:, i])
+        #     pose_arr_interp[:, i] = interp_func(new_time)
+
+        # pose_seq = smooth_pose_seq(pose_arr_interp)
+        # # pose_seq = np.load(config['pose_temp'])
+        # mirrored_pose_seq = np.concatenate((pose_seq, pose_seq[-2:0:-1]), axis=0)
+        # cycled_pose_seq = np.tile(mirrored_pose_seq, (sample['seq_len'] // len(mirrored_pose_seq) + 1, 1))[
+        #                   :sample['seq_len']]
+        total_frames = pose.shape[0]
+        pose_arr_interp = np.zeros((total_frames, 6))
+        for i in range(6):
+            interp_func = interp1d(np.arange(total_frames), pose_arr[:, i])
+            pose_arr_interp[:, i] = interp_func(np.arange(total_frames))
+        mirrored_pose_seq = np.concatenate((pose_arr_interp, pose_arr_interp[-2:0:-1]), axis=0)
+        cycled_pose_seq = np.tile(mirrored_pose_seq, (sample['seq_len'] // len(mirrored_pose_seq) + 1, 1))[
+                          :sample['seq_len']]
+
+        # project 3D mesh to 2D landmark
+        projected_vertices = project_points(pred, face_result['trans_mat'], cycled_pose_seq, [height, width])
+
+        pose_images = []
+        for i, verts in enumerate(projected_vertices):
+            lmk_img = vis.draw_landmarks((width, height), verts, normed=False)
+            pose_images.append(lmk_img)
+
+        pose_list = []
+        pose_tensor_list = []
+        print(f"pose by audio has {len(pred)} frames, but we only generate {video_length} frames, with {fps} fps")
+        pose_transform = transforms.Compose(
+            [transforms.Resize((height, width)), transforms.ToTensor()]
+        )
+        for pose_image_np in pose_images[: video_length]:
+            pose_image_pil = Image.fromarray(cv2.cvtColor(pose_image_np, cv2.COLOR_BGR2RGB))
+            pose_tensor_list.append(pose_transform(pose_image_pil))
+            pose_image_np = cv2.resize(pose_image_np, (width, height))
+            pose_list.append(pose_image_np)
+
+        pose_list = np.array(pose_list)
+
+        video_length = len(pose_tensor_list)
+
+        ref_image_tensor = pose_transform(ref_image_pil)  # (c, h, w)
+        ref_image_tensor = ref_image_tensor.unsqueeze(1).unsqueeze(
+            0
+        )  # (1, c, 1, h, w)
+        ref_image_tensor = repeat(
+            ref_image_tensor, "b c f h w -> b c (repeat f) h w", repeat=video_length
+        )
+
+        pose_tensor = torch.stack(pose_tensor_list, dim=0)  # (f, c, h, w)
+        pose_tensor = pose_tensor.transpose(0, 1)
+        pose_tensor = pose_tensor.unsqueeze(0)
+
+        video = pipe(
+            ref_image_pil,
+            pose_list,
+            ref_pose,
+            width,
+            height,
+            video_length,
+            steps,
+            cfg,
+            generator=generator,
+        ).videos
+
+        print(f'{video.shape}')
+        video = video.permute(0, 2, 3, 4, 1)
+        print(f'{video.shape}')
+
+        return video
+
+
+class AniPortraitAudioDrivenRun:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "pipe": ("Pose2VideoPipeline",),
+                "wav2vec2_path": (
+                    "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/wav2vec2-base-960h"}),
+                "a2m_model": ("Audio2MeshModel",),
+                "image": ("IMAGE",),
+                "pose": ("IMAGE",),
+                "audio": ("VHS_AUDIO",),
+                "width": ("INT", {"default": 512}),
+                "height": ("INT", {"default": 512}),
+                "video_length": ("INT", {"default": 16}),
+                "fps": ("INT", {"default": 24}),
+                "steps": ("INT", {"default": 25}),
+                "cfg": ("FLOAT", {"default": 3.5}),
+                "seed": ("INT", {"default": 1234}),
+                "weight_dtype": (["fp16", "fp32"], {"default": "fp16"}),
+                "min_face_detection_confidence": ("FLOAT", {"default": 0.5}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "run"
+    CATEGORY = "AniPortrait"
+
+    def run(self, pipe, wav2vec2_path, a2m_model, image, pose, audio, width, height, video_length, fps, steps, cfg,
+            seed, weight_dtype, min_face_detection_confidence):
+        generator = torch.manual_seed(seed)
+        config = OmegaConf.load(audio_config_path)
+        OmegaConf.update(config, "inference_config", inference_config_path)
+        OmegaConf.update(config, "audio_inference_config", audio_inference_config_path)
+        OmegaConf.update(config, "weight_dtype", weight_dtype)
+
+        if config.weight_dtype == "fp16":
+            weight_dtype = torch.float16
+        else:
+            weight_dtype = torch.float32
+
+        audio_infer_config = OmegaConf.load(config.audio_inference_config)
+        OmegaConf.update(audio_infer_config, "a2m_model.model_path", wav2vec2_path)
+        OmegaConf.update(audio_infer_config, "a2p_model.model_path", wav2vec2_path)
+
+        ref_image = 255.0 * image[0].cpu().numpy()
+        ref_image_pil = Image.fromarray(np.clip(ref_image, 0, 255).astype(np.uint8))
+        ref_image_w, ref_image_h = ref_image_pil.size
+
+        # config = OmegaConf.load(config_path)
+
+        date_str = datetime.now().strftime("%Y%m%d")
+        time_str = datetime.now().strftime("%H%M")
+        save_dir_name = f"{time_str}--seed_{seed}-{width}x{height}"
+
+        # save_dir = Path(f"output/{date_str}/{save_dir_name}")
+        # save_dir.mkdir(exist_ok=True, parents=True)
+
+        lmk_extractor = LMKExtractor(min_face_detection_confidence=min_face_detection_confidence)
+        vis = FaceMeshVisualizer(forehead_edge=False)
+
+        # ref_name = Path(ref_image_path).stem
+        # audio_name = Path(audio_path).stem
+
+        # ref_image_pil = Image.open(ref_image_path).convert("RGB")
+        ref_image_np = cv2.cvtColor(np.array(ref_image_pil), cv2.COLOR_RGB2BGR)
+        ref_image_np = cv2.resize(ref_image_np, (height, width))
+
+        face_result = lmk_extractor(ref_image_np)
+        assert face_result is not None, "No face detected."
+        print(f'{face_result["lmks"]}')
+        lmks = face_result['lmks'].astype(np.float32)
+
+        ref_pose = vis.draw_landmarks((ref_image_np.shape[1], ref_image_np.shape[0]), lmks, normed=True)
+
+        temp_path = os.path.join(comfy_path, 'input', 'audio', 'tmp')
+        if not os.path.exists(temp_path):
+            os.makedirs(temp_path)
+        sample = prepare_audio_feature_from_audio_data(audio(), temp_path, fps=fps,
+                                                       wav2vec_model_path=audio_infer_config['a2m_model']['model_path'])
         sample['audio_feature'] = torch.from_numpy(sample['audio_feature']).float().cuda()
         sample['audio_feature'] = sample['audio_feature'].unsqueeze(0)
 
@@ -710,6 +904,7 @@ NODE_CLASS_MAPPINGS = {
     "AniPortraitLoader": AniPortraitLoader,
     "AniPortraitVideo2VideoLoader": AniPortraitVideo2VideoLoader,
     "AniPortraitRun": AniPortraitRun,
+    "AniPortraitAudioDrivenRun": AniPortraitAudioDrivenRun,
     "AniPortraitVideo2VideoRun": AniPortraitVideo2VideoRun,
     "MaskList2Video": MaskList2Video,
     "Box2Video": Box2Video,
