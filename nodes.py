@@ -414,7 +414,7 @@ class AniPortraitAudioDrivenRun:
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "VHS_AUDIO")
+    RETURN_TYPES = ("IMAGE",)
     FUNCTION = "run"
     CATEGORY = "AniPortrait"
 
@@ -581,7 +581,7 @@ class AniPortraitAudioDrivenRun:
         video = video.permute(0, 2, 3, 4, 1)
         print(f'{video.shape}')
 
-        return (video, audio)
+        return video
 
 
 class AniPortraitVideo2VideoLoader:
