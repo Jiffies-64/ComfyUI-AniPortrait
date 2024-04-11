@@ -416,7 +416,7 @@ class AniPortraitAudioDrivenRun:
             },
         }
 
-    RETURN_TYPES = ("IMAGE",)
+    RETURN_TYPES = ("IMAGE", "VHS_AUDIO")
     FUNCTION = "run"
     CATEGORY = "AniPortrait"
 
@@ -582,10 +582,10 @@ class AniPortraitAudioDrivenRun:
         video = video.permute(0, 2, 3, 4, 1)
         print(f'{video.shape}')
 
-        return video
+        return (video, audio)
 
 
-class AniPortraitVideo2VideoLoader:
+class AniPortraitFaceSwapLoader:
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -685,7 +685,7 @@ class AniPortraitVideo2VideoLoader:
         return (pipe,)
 
 
-class AniPortraitVideo2VideoRun:
+class AniPortraitFaceSwapRun:
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -902,10 +902,10 @@ class CoverVideo:
 
 NODE_CLASS_MAPPINGS = {
     "AniPortraitLoader": AniPortraitLoader,
-    "AniPortraitVideo2VideoLoader": AniPortraitVideo2VideoLoader,
+    "AniPortraitFaceSwapLoader": AniPortraitFaceSwapLoader,
     "AniPortraitRun": AniPortraitRun,
     "AniPortraitAudioDrivenRun": AniPortraitAudioDrivenRun,
-    "AniPortraitVideo2VideoRun": AniPortraitVideo2VideoRun,
+    "AniPortraitFaceSwapRun": AniPortraitFaceSwapRun,
     "MaskList2Video": MaskList2Video,
     "Box2Video": Box2Video,
     "CoverVideo": CoverVideo,
