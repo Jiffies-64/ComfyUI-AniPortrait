@@ -41,6 +41,7 @@ from scipy.spatial.transform import Rotation as R
 from scipy.interpolate import interp1d
 from .src.utils.pose_util import project_points, project_points_with_trans
 
+
 ani_path = f'{node_path}/ComfyUI-AniPortrait'
 # config_path = f'{ani_path}/configs/prompts/animation_audio.yaml'
 audio_config_path = f'{ani_path}/configs/prompts/animation_audio.yaml'
@@ -58,24 +59,23 @@ class AniPortraitLoader:
         return {
             "required": {
                 "sd_path": (
-                    "STRING",
-                    {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/stable-diffusion-v1-5"}),
+                "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/stable-diffusion-v1-5"}),
                 "vae_path": (
-                    "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/sd-vae-ft-mse"}),
+                "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/sd-vae-ft-mse"}),
                 "image_encoder_path": (
-                    "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/image_encoder"}),
+                "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/image_encoder"}),
                 "wav2vec2_path": (
-                    "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/wav2vec2-base-960h"}),
+                "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/wav2vec2-base-960h"}),
                 "a2m_ckpt": (
-                    "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/audio2mesh.pt"}),
+                "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/audio2mesh.pt"}),
                 "motion_module_path": (
-                    "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/motion_module.pth"}),
+                "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/motion_module.pth"}),
                 "denoising_unet_path": (
-                    "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/denoising_unet.pth"}),
+                "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/denoising_unet.pth"}),
                 "reference_unet_path": (
-                    "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/reference_unet.pth"}),
+                "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/reference_unet.pth"}),
                 "pose_guider_path": (
-                    "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/pose_guider.pth"}),
+                "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/pose_guider.pth"}),
                 "weight_dtype": (["fp16", "fp32"], {"default": "fp16"}),
             },
         }
@@ -209,7 +209,7 @@ class AniPortraitRun:
             "required": {
                 "pipe": ("Pose2VideoPipeline",),
                 "wav2vec2_path": (
-                    "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/wav2vec2-base-960h"}),
+                "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/wav2vec2-base-960h"}),
                 "a2m_model": ("Audio2MeshModel",),
                 "image": ("IMAGE",),
                 "pose": ("IMAGE",),
@@ -277,8 +277,7 @@ class AniPortraitRun:
 
         ref_pose = vis.draw_landmarks((ref_image_np.shape[1], ref_image_np.shape[0]), lmks, normed=True)
 
-        sample = prepare_audio_feature(audio_path, fps=fps,
-                                       wav2vec_model_path=audio_infer_config['a2m_model']['model_path'])
+        sample = prepare_audio_feature(audio_path, fps=fps, wav2vec_model_path=audio_infer_config['a2m_model']['model_path'])
         sample['audio_feature'] = torch.from_numpy(sample['audio_feature']).float().cuda()
         sample['audio_feature'] = sample['audio_feature'].unsqueeze(0)
 
@@ -334,8 +333,7 @@ class AniPortraitRun:
             interp_func = interp1d(np.arange(total_frames), pose_arr[:, i])
             pose_arr_interp[:, i] = interp_func(np.arange(total_frames))
         mirrored_pose_seq = np.concatenate((pose_arr_interp, pose_arr_interp[-2:0:-1]), axis=0)
-        cycled_pose_seq = np.tile(mirrored_pose_seq, (sample['seq_len'] // len(mirrored_pose_seq) + 1, 1))[
-                          :sample['seq_len']]
+        cycled_pose_seq = np.tile(mirrored_pose_seq, (sample['seq_len'] // len(mirrored_pose_seq) + 1, 1))[:sample['seq_len']]
 
         # project 3D mesh to 2D landmark
         projected_vertices = project_points(pred, face_result['trans_mat'], cycled_pose_seq, [height, width])
@@ -390,7 +388,7 @@ class AniPortraitRun:
         print(f'{video.shape}')
 
         return video
-
+    
 
 class AniPortraitAudioDrivenRun:
     @classmethod
@@ -467,11 +465,12 @@ class AniPortraitAudioDrivenRun:
 
         ref_pose = vis.draw_landmarks((ref_image_np.shape[1], ref_image_np.shape[0]), lmks, normed=True)
 
+
         temp_path = os.path.join(comfy_path, 'input', 'audio', 'tmp')
         if not os.path.exists(temp_path):
             os.makedirs(temp_path)
         sample = prepare_audio_feature_from_audio_data(audio(), temp_path, fps=fps,
-                                                       wav2vec_model_path=audio_infer_config['a2m_model']['model_path'])
+                                       wav2vec_model_path=audio_infer_config['a2m_model']['model_path'])
         sample['audio_feature'] = torch.from_numpy(sample['audio_feature']).float().cuda()
         sample['audio_feature'] = sample['audio_feature'].unsqueeze(0)
 
@@ -585,26 +584,25 @@ class AniPortraitAudioDrivenRun:
         return (video, audio)
 
 
-class AniPortraitFaceSwapLoader:
+class AniPortraitVideo2VideoLoader:
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
                 "sd_path": (
-                    "STRING",
-                    {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/stable-diffusion-v1-5"}),
+                "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/stable-diffusion-v1-5"}),
                 "vae_path": (
-                    "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/sd-vae-ft-mse"}),
+                "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/sd-vae-ft-mse"}),
                 "image_encoder_path": (
-                    "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/image_encoder"}),
+                "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/image_encoder"}),
                 "motion_module_path": (
-                    "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/motion_module.pth"}),
+                "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/motion_module.pth"}),
                 "denoising_unet_path": (
-                    "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/denoising_unet.pth"}),
+                "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/denoising_unet.pth"}),
                 "reference_unet_path": (
-                    "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/reference_unet.pth"}),
+                "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/reference_unet.pth"}),
                 "pose_guider_path": (
-                    "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/pose_guider.pth"}),
+                "STRING", {"default": "/home/ubuntu/aniportrait/AniPortrait/pretrained_model/pose_guider.pth"}),
                 "weight_dtype": (["fp16", "fp32"], {"default": "fp16"}),
             },
         }
@@ -684,8 +682,7 @@ class AniPortraitFaceSwapLoader:
 
         return (pipe,)
 
-
-class AniPortraitFaceSwapRun:
+class AniPortraitVideo2VideoRun:
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -708,7 +705,7 @@ class AniPortraitFaceSwapRun:
     CATEGORY = "AniPortrait"
 
     def run(self, pipe, image, pose, width, height, fps, steps, cfg,
-            seed, min_face_detection_confidence):
+                seed, min_face_detection_confidence):
         generator = torch.manual_seed(seed)
         lmk_extractor = LMKExtractor(min_face_detection_confidence=min_face_detection_confidence)
         vis = FaceMeshVisualizer(forehead_edge=False)
@@ -789,7 +786,7 @@ class AniPortraitFaceSwapRun:
             cfg,
             generator=generator,
         ).videos
-
+        
         print(f'{video.shape}')
         video = video.permute(0, 2, 3, 4, 1)
         print(f'{video.shape}')
@@ -902,10 +899,10 @@ class CoverVideo:
 
 NODE_CLASS_MAPPINGS = {
     "AniPortraitLoader": AniPortraitLoader,
-    "AniPortraitFaceSwapLoader": AniPortraitFaceSwapLoader,
+    "AniPortraitVideo2VideoLoader": AniPortraitVideo2VideoLoader,
     "AniPortraitRun": AniPortraitRun,
     "AniPortraitAudioDrivenRun": AniPortraitAudioDrivenRun,
-    "AniPortraitFaceSwapRun": AniPortraitFaceSwapRun,
+    "AniPortraitVideo2VideoRun": AniPortraitVideo2VideoRun,
     "MaskList2Video": MaskList2Video,
     "Box2Video": Box2Video,
     "CoverVideo": CoverVideo,
